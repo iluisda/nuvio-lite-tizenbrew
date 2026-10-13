@@ -160,3 +160,5 @@ html, body {
 @keyframes bl { 50% { opacity: 0; } }
 #search-results { white-space: nowrap; }
 #search-hint { position: absolute; bottom: 60px; left: 90px; font-size: 24px; color: #67708a; }
+
+#h5-player { position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: #000; z-index: 5; display: none; }

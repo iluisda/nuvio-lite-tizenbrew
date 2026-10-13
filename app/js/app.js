@@ -353,11 +353,25 @@ var hideTimer = null, subClearTimer = null;
 
 function avplay() { return (window.webapis && window.webapis.avplay) ? window.webapis.avplay : null; }
 
+// --- Modo HTML5 (módulos TizenBrew: sin webapis/AVPlay) ---
+var h5video = null;
+function h5ensure() {
+    if (!h5video) {
+        h5video = document.createElement('video');
+        h5video.id = 'h5-player';
+        h5video.setAttribute('playsinline', '');
+        document.body.appendChild(h5video);
+    }
+    return h5video;
+}
+function h5Time() { return h5video ? Math.round((h5video.currentTime || 0) * 1000) : 0; }
+
 // Wznowienie: przewiń do zapisanej pozycji dopiero gdy odtwarzacz gra (Tizen 2.3 nie przewija przed play)
 function doPendingSeek() {
     if (pendingSeekMs <= 0) return;
     var target = Math.round(pendingSeekMs);
     pendingSeekMs = 0;                 // wyczyść przed przewinięciem, by uniknąć pętli
+    if (h5video) { try { h5video.currentTime = target / 1000; } catch (e) {} $('player-status').innerHTML = ''; return; }
     var ap = avplay(); if (!ap) return;
     try { ap.seekTo(target); }
     catch (e) { try { ap.jumpForward(target); } catch (e2) {} }
@@ -444,7 +458,7 @@ function playStream(s) {
     $('player-status').innerHTML = 'Cargando vídeo...';
     $('player-fill').style.width = '0%';
     showControls();
-    if (!ap) { $('player-status').innerHTML = 'AVPlay no disponible en este dispositivo.'; return; }
+    if (!ap) { return playStreamHtml5(s); }
     loadExtSubs();
     try {
         try { ap.stop(); ap.close(); } catch (e0) {}
@@ -490,6 +504,30 @@ function playStream(s) {
     } catch (ex) {
         $('player-status').innerHTML = 'Error: ' + ex.message;
     }
+}
+
+// Reproductor HTML5 (fallback para módulos sin AVPlay)
+function playStreamHtml5(s) {
+    var v = h5ensure();
+    v.style.display = 'block';
+    v.src = s.url;
+    duration = 0; playing = false; pendingSeekMs = resumeMs > 3000 ? resumeMs : 0;
+    loadExtSubs();
+    v.onloadedmetadata = function () { try { duration = Math.round((v.duration || 0) * 1000); } catch (e) {} };
+    v.onwaiting = function () { $('player-status').innerHTML = 'Cargando vídeo...'; };
+    v.onplaying = function () { playing = true; $('player-status').innerHTML = ''; };
+    v.oncanplay = function () { if (!pendingSeekMs) $('player-status').innerHTML = ''; };
+    v.ontimeupdate = function () {
+        var t = h5Time();
+        if (pendingSeekMs > 0 && t < pendingSeekMs - 4000) { try { v.currentTime = pendingSeekMs / 1000; pendingSeekMs = 0; } catch (e) {} }
+        if (duration > 0) $('player-fill').style.width = (t / duration * 100) + '%';
+        $('player-time').innerHTML = fmt(t) + (duration ? ' / ' + fmt(duration) : '');
+    };
+    v.onended = function () { stopPlayback(); };
+    v.onerror = function () { $('player-status').innerHTML = 'No se pudo reproducir (formato no soportado por esta tele).'; showControls(); };
+    var pp = v.play();
+    if (pp && pp.then) { pp.catch(function () { $('player-status').innerHTML = 'Pulsa OK para reproducir'; }); }
+    startProgressSync(); showControls();
 }
 
 // ---------- Menu ścieżek: dźwięk + napisy ----------
@@ -590,7 +628,7 @@ function saveSubFile(text, cb) {
 }
 
 // Zapis postępu na konto Nuvio (co 15 s, przy pauzie i zatrzymaniu) — kompatybilny między urządzeniami
-function currentPos() { var ap = avplay(); try { return ap ? ap.getCurrentTime() : 0; } catch (e) { return 0; } }
+function currentPos() { if (h5video) return h5Time(); var ap = avplay(); try { return ap ? ap.getCurrentTime() : 0; } catch (e) { return 0; } }
 function saveProgress() {
     if (!playCtx) return;
     var pos = currentPos();
@@ -613,11 +651,20 @@ function stopPlayback() {
     $('subtitle-text').innerHTML = '';
     var ap = avplay();
     if (ap) { try { ap.stop(); ap.close(); } catch (e) {} }
+    if (h5video) { try { h5video.pause(); h5video.removeAttribute('src'); h5video.load(); } catch (e) {} h5video.style.display = 'none'; }
     playing = false; duration = 0; resumeMs = 0;
     show('streams');
 }
 
 function togglePause() {
+    if (h5video) {
+        showControls();
+        try {
+            if (h5video.paused) { h5video.play(); playing = true; $('player-status').innerHTML = ''; }
+            else { h5video.pause(); playing = false; $('player-status').innerHTML = '❚❚ Pausa'; saveProgress(); }
+        } catch (e) {}
+        return;
+    }
     var ap = avplay(); if (!ap) return;
     try {
         if (playing) { ap.pause(); playing = false; $('player-status').innerHTML = '❚❚ Pausa'; showControls(); saveProgress(); }
@@ -626,8 +673,17 @@ function togglePause() {
 }
 
 function seek(deltaMs) {
-    var ap = avplay(); if (!ap) return;
     showControls();
+    if (h5video) {
+        try {
+            var nt = (h5video.currentTime || 0) + deltaMs / 1000;
+            if (nt < 0) nt = 0;
+            if (duration > 0 && nt * 1000 > duration - 1000) nt = duration / 1000 - 1;
+            h5video.currentTime = nt;
+        } catch (e) {}
+        return;
+    }
+    var ap = avplay(); if (!ap) return;
     try {
         if (deltaMs > 0) ap.jumpForward(Math.abs(deltaMs));
         else ap.jumpBackward(Math.abs(deltaMs));
