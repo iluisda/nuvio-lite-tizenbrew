@@ -1,0 +1,28 @@
+{
+  "name": "nuvio-lite-tizenbrew",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Nuvio Lite - backport ES5 para Samsung Tizen 3.0 (2017) con bridge local en la LAN",
+  "packageType": "app",
+  "appName": "Nuvio Lite",
+  "appPath": "app/index.html",
+  "keys": [
+    "MediaPlay",
+    "MediaPause",
+    "MediaPlayPause",
+    "MediaStop",
+    "MediaFastForward",
+    "MediaRewind",
+    "ColorF0Red",
+    "ColorF1Green",
+    "ColorF2Yellow",
+    "ColorF3Blue",
+    "Info"
+  ],
+  "evaluateScriptOnDocumentStart": false,
+  "files": [
+    "app",
+    "icon.png",
+    "README.md"
+  ]
+}
