@@ -472,7 +472,11 @@ function qualFromText(t) {
   if (t.indexOf('480') > -1) return '480p';
   return '';
 }
+const ADDON_STREAMS_CACHE = {};
 async function addonStreams(type, tmdbId, season, episode) {
+  const ck = type + '|' + tmdbId + '|' + (season || '') + '|' + (episode || '');
+  const cc = ADDON_STREAMS_CACHE[ck];
+  if (cc && Date.now() - cc.ts < 300000) return cc.data;
   const addons = await getUserAddons();
   const stType = (type === 'series' || type === 'tv') ? 'series' : 'movie';
   const imdb = await tmdbToImdb(tmdbId, stType === 'series' ? 'tv' : 'movie');
@@ -481,26 +485,175 @@ async function addonStreams(type, tmdbId, season, episode) {
   const usable = addons.filter(a => a.resources.indexOf('stream') > -1 && (!a.types.length || a.types.indexOf(stType) > -1));
   const jobs = usable.map(async a => {
     try {
-      const j = await withTimeout(getJSON(`${a.base}/stream/${stType}/${encodeURIComponent(vid)}.json`), 20000, a.name);
-      return (j.streams || []).filter(s => s.url).map(s => {
+      const j = await withTimeout(getJSON(`${a.base}/stream/${stType}/${encodeURIComponent(vid)}.json`), 30000, a.name);
+      return (j.streams || []).map(s => {
         const ph = s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request;
         const desc = (s.description || s.title || s.name || '').toString();
+        const fn = (s.behaviorHints && s.behaviorHints.filename) || '';
         let sizeBytes = (s.behaviorHints && s.behaviorHints.videoSize) || 0;
         if (!sizeBytes) { const m = desc.match(/([\d.]+)\s?(GB|MB)/i); if (m) sizeBytes = parseFloat(m[1]) * (m[2].toUpperCase() === 'GB' ? 1073741824 : 1048576); }
-        return {
-          provider: a.name, name: (s.name || a.name).toString(), _addon: true,
-          title: (s.name || a.name).toString().replace(/\n/g, ' '),
-          desc: desc,                            // pełny opis (język, rozmiar, seedery) z zachowaniem \n
+        const base = {
+          provider: a.name, name: (s.name || a.name).toString().replace(/\n/g, ' '), _addon: true,
+          title: ((s.name || a.name) + (fn ? '  · ' + fn : '')).toString().replace(/\n/g, ' '),
+          desc: desc,
           size: sizeBytes || null,
-          quality: qualFromText(desc + ' ' + (s.name || '')), url: s.url,
-          headers: ph || s.headers || null
+          quality: qualFromText(desc + ' ' + (s.name || '') + ' ' + fn),
+          fn: fn, headers: ph || s.headers || null
         };
-      });
+        if (s.url) { base.url = s.url; base.kind = 'direct'; return base; }
+        if (s.infoHash) {
+          const trackers = (s.sources || []).filter(x => /^tracker:/.test(x)).map(x => x.slice(8));
+          base.kind = 'torrent'; base.infoHash = s.infoHash;
+          base.magnet = magnetWithTrackers(s.infoHash, fn || base.title || 'video', trackers);
+          base.fileIdx = (typeof s.fileIdx === 'number') ? s.fileIdx : null;
+          return base;
+        }
+        if (s.externalUrl) { base.kind = 'external'; base.externalUrl = s.externalUrl; return base; }
+        return null;
+      }).filter(Boolean);
     } catch (e) { console.log('[addon-stream]', a.name, e.message); return []; }
   });
   const res = await Promise.all(jobs);
-  return [].concat.apply([], res);
+  const all = [].concat.apply([], res);
+  if (all.length) ADDON_STREAMS_CACHE[ck] = { ts: Date.now(), data: all };
+  return all;
 }
+
+// --- ranking de streams (calidad + seeds + mp4 + idioma) ---
+function streamScore(s) {
+  let sc = 0;
+  const q = s.quality || '';
+  if (q === '2160p') sc += 400; else if (q === '1080p') sc += 300; else if (q === '720p') sc += 120; else if (q === '480p') sc += 20;
+  const d = (s.desc || '') + ' ' + (s.title || '') + ' ' + (s.fn || '');
+  const sd = d.match(/👤\s*(\d+)/); if (sd) sc += Math.min(120, parseInt(sd[1], 10));
+  if (/\.mp4\b|\bmp4\b/i.test(d)) sc += 60;
+  if (/yify|psa\b|rarbg/i.test(d)) sc += 25;
+  if (/(\beng\b|english|🇬🇧|🇺🇸|🇨🇦|🇦🇺|multi|dual)/i.test(d)) sc += 40;
+  if (/(latino|castellano|dublado|dubbed|\bdub\b|espanol|espa\u00f1ol|🇪🇸|🇧🇷|🇵🇹|🇷🇺|🇺🇦|🇵🇱|lektor|hindi|dubbing)/i.test(d)) sc -= 35;
+  if (/[Ѐ-ӿ]{4,}/.test(s.title || '')) sc -= 30;   // tytuły cyrylicą (rosyjskie dubbingi)
+  if (s.kind === 'direct') sc += 10;
+  return sc;
+}
+
+// --- Torrents (webtorrent): streaming z /api/torrent ---
+const TORR_DIR = path.join(process.env.HOME || '.', 'nuvio-bridge', 'torrents');
+// trackers públicos por defecto (los addons tipo Torrentio NO mandan trackers: sin esto no hay peers)
+const DEFAULT_TRACKERS = [
+  'udp://tracker.opentrackr.org:1337/announce',
+  'udp://open.tracker.cl:1337/announce',
+  'udp://open.demonii.com:1337/announce',
+  'udp://tracker.openbittorrent.com:6969/announce',
+  'udp://exodus.desync.com:6969/announce',
+  'udp://tracker.torrent.eu.org:451/announce',
+  'https://tracker.tamersunion.org:443/announce'
+];
+function magnetWithTrackers(hash, dn, trackers) {
+  let m = 'magnet:?xt=urn:btih:' + hash + '&dn=' + encodeURIComponent(dn || 'video');
+  const all = (trackers || []).concat(DEFAULT_TRACKERS);
+  const seen = {};
+  for (let i = 0; i < all.length; i++) { if (all[i] && !seen[all[i]]) { seen[all[i]] = 1; m += '&tr=' + encodeURIComponent(all[i]); } }
+  return m;
+}
+let WT = null, WT_P = null;
+function getWT() {
+  if (WT) return Promise.resolve(WT);
+  if (WT_P) return WT_P;
+  WT_P = import('webtorrent').then(m => {
+    const WebTorrent = (m && (m.default || m));
+    WT = new WebTorrent({ maxConns: 80, dht: true });
+    WT.on('error', e => console.log('[wt]', e && e.message));
+    console.log('[wt] webtorrent listo');
+    return WT;
+  }).catch(e => { WT_P = null; throw e; });
+  return WT_P;
+}
+const TORR = {};       // hash -> { t, last }
+const TORR_PEND = {};  // hash -> Promise
+function torrentEnsure(hash, magnet) {
+  if (magnet.indexOf('&tr=') < 0) magnet = magnetWithTrackers(hash, '', []);   // sin trackers no hay peers
+  if (TORR[hash] && TORR[hash].t && (TORR[hash].t.metadata || TORR[hash].t.ready)) return Promise.resolve(TORR[hash].t);
+  if (TORR_PEND[hash]) return TORR_PEND[hash];
+  TORR_PEND[hash] = (async () => {
+    const wt = await getWT();
+    let t = null;
+    try {
+      const found = await wt.get(hash);           // v3: get() es async
+      if (found && typeof found.once === 'function') t = found;
+    } catch (e) {}
+    if (!t) {
+      fs.mkdirSync(TORR_DIR, { recursive: true });
+      t = wt.add(magnet, { path: TORR_DIR });
+    }
+    if (!t || typeof t.once !== 'function') throw new Error('webtorrent: no se pudo agregar el torrent');
+    TORR[hash] = { t: t, last: Date.now() };
+    if (t.metadata || t.ready) return t;
+    await new Promise((ok, bad) => {
+      const to = setTimeout(() => bad(new Error('metadata timeout (poucos seeders?)')), 60000);
+      t.once('metadata', () => { clearTimeout(to); ok(); });
+      t.once('error', e => { clearTimeout(to); bad(e); });
+    });
+    return t;
+  })();
+  TORR_PEND[hash].then(() => { delete TORR_PEND[hash]; }, () => { delete TORR_PEND[hash]; });
+  return TORR_PEND[hash];
+}
+function torrentTouch(h) { if (TORR[h]) TORR[h].last = Date.now(); }
+function pickTorrentFile(t, ix, fn) {
+  if (ix != null && t.files[ix]) return t.files[ix];
+  if (fn) {
+    const lf = String(fn).toLowerCase();
+    let f = t.files.find(x => x.name.toLowerCase() === lf || String(x.path || '').toLowerCase().endsWith(lf));
+    if (f) return f;
+    const ep = lf.match(/[sS](\d{1,2})[eE](\d{1,2})/);
+    if (ep) {
+      const pat = new RegExp('[sS]0*' + parseInt(ep[1], 10) + '[eE]0*' + parseInt(ep[2], 10));
+      f = t.files.filter(x => pat.test(x.name)).sort((a, b) => b.length - a.length)[0];
+      if (f) return f;
+    }
+  }
+  const vids = t.files.filter(x => /\.(mp4|mkv|avi|mov|m4v|webm|ts)$/i.test(x.name));
+  const cand = (vids.length ? vids : t.files).slice().sort((a, b) => b.length - a.length);
+  return cand[0] || null;
+}
+const MIME_BY_EXT = { mp4: 'video/mp4', m4v: 'video/mp4', mkv: 'video/x-matroska', avi: 'video/x-msvideo', mov: 'video/quicktime', webm: 'video/webm', ts: 'video/mp2t', srt: 'application/x-subrip', vtt: 'text/vtt' };
+function mimeByName(n) { const m = String(n || '').toLowerCase().match(/\.([a-z0-9]+)$/); return (m && MIME_BY_EXT[m[1]]) || 'application/octet-stream'; }
+function streamTorrentFile(t, file, req, res) {
+  const size = file.length;
+  const range = req.headers.range;
+  let start = 0, end = size - 1, code = 200;
+  if (range) {
+    const m = /bytes=(\d*)-(\d*)/.exec(range);
+    if (m && (m[1] !== '' || m[2] !== '')) {
+      code = 206;
+      start = m[1] !== '' ? parseInt(m[1], 10) : Math.max(0, size - parseInt(m[2], 10));
+      end = m[2] !== '' ? parseInt(m[2], 10) : size - 1;
+      if (end >= size) end = size - 1;
+    }
+  }
+  if (start >= size || start > end) { res.writeHead(416, { 'Content-Range': 'bytes */' + size }); return res.end(); }
+  const headers = { 'Content-Type': mimeByName(file.name), 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' };
+  if (code === 206) headers['Content-Range'] = 'bytes ' + start + '-' + end + '/' + size;
+  headers['Content-Length'] = String(end - start + 1);
+  res.writeHead(code, headers);
+  const stream = file.createReadStream({ start: start, end: end });
+  let done = false;
+  const fin = () => { if (done) return; done = true; try { stream.destroy(); } catch (e) {} };
+  res.on('close', fin); res.on('error', fin);
+  stream.on('error', e => { console.log('[torrent] stream err', e && e.message); try { res.destroy(); } catch (x) {} });
+  stream.pipe(res);
+}
+// limpieza de torrents inactivos > 15 min
+setInterval(() => {
+  const now = Date.now();
+  Object.keys(TORR).forEach(h => {
+    const e = TORR[h];
+    if (!e || !e.last || now - e.last > 15 * 60000) {
+      try { e && e.t && e.t.destroy({ destroyStore: true }); } catch (x) {}
+      delete TORR[h];
+      console.log('[torrent] cleanup', h);
+    }
+  });
+}, 5 * 60000);
 
 // Napisy z addonów Stremio (np. OpenSubtitles v3) — protokół subtitles
 async function addonSubtitles(type, tmdbId, season, episode) {
@@ -776,13 +929,20 @@ async function handleApi(req, res, u) {
     const type = seg[1], id = seg[2];
     const season = u.searchParams.get('season');
     const episode = u.searchParams.get('episode');
-    // Strumienie z TWOICH addonów Nuvio (AIOStreams itd.) + zapasowo moje providery.
+    // Streams z addonów Nuvio (AIOStreams/Torrentio/TorrentClaw...) + zapasowo providery (cap global 25s).
     const [fromAddons, fromProviders] = await Promise.all([
       addonStreams(type, id, season, episode).catch(() => []),
-      gatherStreams(type, id, season, episode).catch(() => [])
+      withTimeout(gatherStreams(type, id, season, episode).catch(() => []), 25000, 'providers').catch(() => [])
     ]);
-    // Addony pokazujemy 1:1 — w kolejności i z opisami dokładnie jak zwrócił dodatek (sam filtruje do najlepszych).
-    // Tylko zapasowe providery sortujemy pod TV i walidujemy (czy realne wideo).
+    let streams = fromAddons.filter(s => s.kind !== 'external');
+    // dedupe: infohash / url / tytuł+kalita
+    const seen = {}; streams = streams.filter(s => {
+      const k = s.infoHash ? ('h:' + s.infoHash) : (s.url ? ('u:' + s.url) : ('t:' + s.title + '|' + s.quality));
+      if (seen[k]) return false; seen[k] = 1; return true;
+    });
+    // ranking: jakość + seedery + mp4 + język (dubbingi na koniec)
+    streams.sort((a, b) => streamScore(b) - streamScore(a));
+    if (streams.length > 100) streams = streams.slice(0, 100);
     let prov = fromProviders;
     prov.sort((a, b) => tvScore(b) - tvScore(a));
     const toCheck = prov.slice(0, 12);
@@ -790,23 +950,48 @@ async function handleApi(req, res, u) {
     let provOk = checks.filter(s => s._ok);
     if (!provOk.length) provOk = toCheck;
     provOk.sort((a, b) => tvScore(b) - tvScore(a));
-    let streams = fromAddons.concat(provOk);
+    streams = streams.concat(provOk.map(s => { if (!s.kind) s.kind = 'direct'; return s; }));
     const host = req.headers.host;
-    // ZAWSZE przez proxy — stary AVPlay nie robi nowoczesnego TLS ani nagłówków. TV gada tylko http z bridge.
     const out = streams.map(s => {
-      const h = (s.headers && Object.keys(s.headers).length) ? Buffer.from(JSON.stringify(s.headers)).toString('base64') : '';
-      const playUrl = `http://${host}/api/proxy?u=${encodeURIComponent(s.url)}` + (h ? `&h=${encodeURIComponent(h)}` : '');
+      let playUrl;
+      if (s.kind === 'torrent') {
+        playUrl = `http://${host}/api/torrent?m=${encodeURIComponent(s.magnet)}` + (s.fileIdx != null ? `&ix=${s.fileIdx}` : '') + (s.fn ? `&fn=${encodeURIComponent(s.fn)}` : '');
+      } else {
+        const h = (s.headers && Object.keys(s.headers).length) ? Buffer.from(JSON.stringify(s.headers)).toString('base64') : '';
+        playUrl = `http://${host}/api/proxy?u=${encodeURIComponent(s.url)}` + (h ? `&h=${encodeURIComponent(h)}` : '');
+      }
       return {
         provider: cleanEmoji(s.provider || s.name || ''),
         title: cleanEmoji(s.title || s.name || 'Stream'),
         desc: cleanEmoji(s.desc || ''),
         size: s.size || null,
         quality: s.quality || '',
+        kind: s.kind || 'direct',
         url: playUrl,
-        direct: s.url
+        direct: s.url || s.magnet || ''
       };
     });
     return send(res, 200, { streams: out });
+  }
+
+  // /api/torrent?m=<magnet>&ix=&fn= -> strumień torrenta (webtorrent, HTTP Range dla TV)
+  if (seg[0] === 'torrent') {
+    const magnet = u.searchParams.get('m') || '';
+    const hm = magnet.match(/urn:btih:([a-fA-F0-9]{40})/i);
+    if (!hm) return send(res, 400, { error: 'magnet inválido' });
+    const hash = hm[1].toLowerCase();
+    const ixS = u.searchParams.get('ix');
+    const fn = u.searchParams.get('fn') || '';
+    try {
+      const t = await torrentEnsure(hash, magnet);
+      const file = pickTorrentFile(t, (ixS != null && ixS !== '') ? parseInt(ixS, 10) : null, fn);
+      if (!file) return send(res, 404, { error: 'archivo no encontrado en el torrent' });
+      torrentTouch(hash);
+      console.log('[torrent]', hash.slice(0, 10), '->', file.name.slice(0, 60), (file.length / 1048576).toFixed(0) + 'MB', 'peers:', t.numPeers);
+      return streamTorrentFile(t, file, req, res);
+    } catch (e) {
+      return send(res, 504, { error: 'torrent: ' + e.message });
+    }
   }
 
   // /api/subtitles/:type/:id?season=&episode=  -> napisy z addonów usera, URL przez proxy

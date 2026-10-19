@@ -173,6 +173,7 @@ html, body {
     background: linear-gradient(transparent, rgba(0,0,0,.88)); box-sizing: border-box; }
 .fc-logo { max-height: 52px; max-width: 230px; display: block; }
 .fc-title { font-size: 34px; font-weight: bold; color: #fff; }
+.fc-fallback { padding: 18px; font-size: 34px; font-weight: bold; color: #fff; }
 
 #view-collection { padding: 110px 60px 0; }
 #coll-title { font-size: 46px; font-weight: bold; margin-bottom: 30px; }

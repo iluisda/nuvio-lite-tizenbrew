@@ -116,6 +116,12 @@ function clearFocusAll() {
 }
 // mantiene visible el elemento enfocado dentro de su scroller (scrollTop programatico;
 // scrollIntoView no funciona bien dentro del #app escalado en M47)
+function bindImgFallback(img, card, title) {
+    img.onerror = function () {
+        card.innerHTML = '';
+        card.appendChild(el('div', 'fc-fallback', esc(title)));
+    };
+}
 function keepVisible(scroller, item) {
     if (!scroller || !item) return;
     var sr = scroller.getBoundingClientRect(), ir = item.getBoundingClientRect();
@@ -216,11 +222,8 @@ function renderRow(i) {
         var card;
         if (it.folder) {
             card = el('div', 'card folder-card-sm');
-            if (it.cover) { var im2 = el('img'); im2.src = it.cover; card.appendChild(im2); }
-            var ov = el('div', 'fc-overlay');
-            if (it.logo) { var lg = el('img', 'fc-logo'); lg.src = it.logo; ov.appendChild(lg); }
-            else ov.appendChild(el('div', 'fc-title', esc(it.title)));
-            card.appendChild(ov);
+            if (it.cover) { var im2 = el('img'); im2.src = it.cover; bindImgFallback(im2, card, it.title); card.appendChild(im2); }
+            else card.appendChild(el('div', 'fc-title', esc(it.title)));
         } else {
             card = el('div', 'card');
             if (it.poster) { var im = el('img'); im.src = it.poster; card.appendChild(im); }
@@ -295,11 +298,8 @@ function renderCollection() {
         var f = folders[i];
         var card = el('div', 'folder-card');
         var img = f.coverImageUrl || f.focusGifUrl || '';
-        if (img) { var im = el('img'); im.src = img; card.appendChild(im); }
-        var ov = el('div', 'fc-overlay');
-        if (f.titleLogoUrl) { var lg = el('img', 'fc-logo'); lg.src = f.titleLogoUrl; ov.appendChild(lg); }
-        else ov.appendChild(el('div', 'fc-title', esc(f.title)));
-        card.appendChild(ov);
+        if (img) { var im = el('img'); im.src = img; bindImgFallback(im, card, f.title); card.appendChild(im); }
+        else card.appendChild(el('div', 'fc-title', esc(f.title)));
         g.appendChild(card);
     }
     focusCollection(0);
@@ -751,6 +751,7 @@ function playStream(s) {
 // Reproductor HTML5 (fallback para módulos sin AVPlay)
 function playStreamHtml5(s) {
     var v = h5ensure();
+    h5ClearSubs();
     v.style.display = 'block';
     v.src = s.url;
     duration = 0; playing = false; pendingSeekMs = resumeMs > 3000 ? resumeMs : 0;
@@ -761,6 +762,7 @@ function playStreamHtml5(s) {
     v.oncanplay = function () { if (!pendingSeekMs) $('player-status').innerHTML = ''; };
     v.ontimeupdate = function () {
         var t = h5Time();
+        h5RenderSubs(t);
         if (pendingSeekMs > 0 && t < pendingSeekMs - 4000) { try { v.currentTime = pendingSeekMs / 1000; pendingSeekMs = 0; } catch (e) {} }
         if (duration > 0) $('player-fill').style.width = (t / duration * 100) + '%';
         $('player-time').innerHTML = fmt(t) + (duration ? ' / ' + fmt(duration) : '');
@@ -826,13 +828,14 @@ function selectSub(i) {
     var ap = avplay();
     $('subtitle-text').innerHTML = '';
     if (it.kind === 'off') {
-        try { ap.setSilentSubtitle ? ap.setSilentSubtitle(true) : null; } catch (e) {}
+        try { if (ap && ap.setSilentSubtitle) ap.setSilentSubtitle(true); } catch (e) {}
+        h5ClearSubs();
         curSubKey = 'off';
     } else if (it.kind === 'embed') {
-        try { if (ap.setSilentSubtitle) ap.setSilentSubtitle(false); ap.setSelectTrack('TEXT', it.index); } catch (e) {}
+        try { if (ap) { if (ap.setSilentSubtitle) ap.setSilentSubtitle(false); ap.setSelectTrack('TEXT', it.index); } } catch (e) {}
         curSubKey = 'embed' + it.index;
     } else if (it.kind === 'ext') {
-        applyExternalSub(it.url);
+        if (avplay()) applyExternalSub(it.url); else h5LoadSub(it.url);
         curSubKey = 'ext' + it.url;
     }
     renderTrackMenu();
@@ -872,6 +875,61 @@ function saveSubFile(text, cb) {
     } catch (e) { cb(null); }
 }
 
+// ---- Subtítulos en modo HTML5 (módulo TizenBrew sin AVPlay): SRT propio ----
+var h5subs = [], h5subsShown = -1, h5subUrl = '';
+function h5ClearSubs() { h5subs = []; h5subsShown = -1; h5subUrl = ''; $('subtitle-text').innerHTML = ''; }
+function srtTimeToMs(t) {
+    var m = t.match(/(\d+):(\d+):(\d+)[,.]?(\d+)?/);
+    if (!m) return 0;
+    return ((+m[1]) * 3600 + (+m[2]) * 60 + (+m[3])) * 1000 + (+(m[4] || 0));
+}
+function parseSubs(text) {
+    var cues = [];
+    text = String(text || '').replace(/\r/g, '');
+    var blocks = text.split(/\n{2,}/);
+    for (var i = 0; i < blocks.length; i++) {
+        var lines = blocks[i].split('\n');
+        var ti = -1;
+        for (var j = 0; j < lines.length; j++) { if (lines[j].indexOf('-->') > -1) { ti = j; break; } }
+        if (ti < 0) continue;
+        var parts = lines[ti].split('-->');
+        var s = srtTimeToMs(parts[0] || ''), e = srtTimeToMs(parts[1] || '');
+        if (!s && !e) continue;
+        var txt = lines.slice(ti + 1).join('\n');
+        if (txt) cues.push({ s: s, e: e || (s + 4000), t: txt });
+    }
+    return cues;
+}
+function h5LoadSub(url) {
+    if (h5subUrl === url && h5subs.length) return;
+    $('player-status').innerHTML = 'Cargando subtítulos...';
+    var x = new XMLHttpRequest();
+    x.open('GET', url, true); x.timeout = 30000;
+    x.onreadystatechange = function () {
+        if (x.readyState !== 4) return;
+        $('player-status').innerHTML = '';
+        if (x.status >= 200 && x.status < 300 && x.responseText) {
+            h5subs = parseSubs(x.responseText); h5subsShown = -1; h5subUrl = url;
+            if (!h5subs.length) $('subtitle-text').innerHTML = '(subtítulo vacío o formato no reconocido)';
+        } else {
+            $('subtitle-text').innerHTML = '(error al cargar el subtítulo)';
+        }
+    };
+    x.onerror = function () { $('player-status').innerHTML = ''; };
+    x.send();
+}
+function h5RenderSubs(tMs) {
+    if (!h5subs.length) return;
+    var idx = -1;
+    for (var i = 0; i < h5subs.length; i++) {
+        if (tMs >= h5subs[i].s - 150 && tMs <= h5subs[i].e + 150) { idx = i; break; }
+    }
+    if (idx === h5subsShown) return;
+    h5subsShown = idx;
+    var st = $('subtitle-text');
+    st.innerHTML = idx >= 0 ? fmtSub(h5subs[idx].t) : '';
+}
+
 // Zapis postępu na konto Nuvio (co 15 s, przy pauzie i zatrzymaniu) — kompatybilny między urządzeniami
 function currentPos() { if (h5video) return h5Time(); var ap = avplay(); try { return ap ? ap.getCurrentTime() : 0; } catch (e) { return 0; } }
 function saveProgress() {
@@ -898,6 +956,7 @@ function stopPlayback() {
     if (ap) { try { ap.stop(); ap.close(); } catch (e) {} }
     if (h5video) { try { h5video.pause(); h5video.removeAttribute('src'); h5video.load(); } catch (e) {} h5video.style.display = 'none'; }
     playing = false; duration = 0; resumeMs = 0;
+    h5ClearSubs();
     show('streams');
 }
 
