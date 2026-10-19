@@ -162,3 +162,39 @@ html, body {
 #search-hint { position: absolute; bottom: 60px; left: 90px; font-size: 24px; color: #67708a; }
 
 #h5-player { position: fixed; left: 0; top: 0; width: 100%; height: 100%; background: #000; z-index: 5; display: none; }
+
+/* ---------- v2 (18-oct): home de la cuenta + colecciones/carpetas ---------- */
+.row-empty, .grid-loading { font-size: 26px; color: #67708a; padding: 24px 0 6px; }
+.loading-card { display: flex; align-items: center; justify-content: center; background: #12151d; }
+.loading-card .spin.small { width: 46px; height: 46px; border-width: 6px; margin: 0;
+    -webkit-animation: sp 1s linear infinite; animation: sp 1s linear infinite; }
+.card.folder-card-sm { width: 440px; height: 248px; }
+.card .fc-overlay { position: absolute; left: 0; bottom: 0; width: 100%; padding: 34px 16px 14px;
+    background: linear-gradient(transparent, rgba(0,0,0,.88)); box-sizing: border-box; }
+.fc-logo { max-height: 52px; max-width: 230px; display: block; }
+.fc-title { font-size: 34px; font-weight: bold; color: #fff; }
+
+#view-collection { padding: 110px 60px 0; }
+#coll-title { font-size: 46px; font-weight: bold; margin-bottom: 30px; }
+#coll-grid { max-height: 880px; overflow: hidden; }
+.folder-card { display: inline-block; width: 420px; height: 236px; margin: 0 28px 28px 0;
+    background: #1a1e28; border-radius: 12px; overflow: hidden; position: relative;
+    vertical-align: top; border: 4px solid transparent; box-sizing: border-box; }
+.folder-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.folder-card.focused { border-color: #ff3d57; -webkit-transform: scale(1.05); transform: scale(1.05);
+    box-shadow: 0 0 24px rgba(255,61,87,.55); z-index: 5; }
+
+#view-folder { padding: 0; }
+#folder-hero { position: absolute; top: 0; left: 0; width: 1920px; height: 330px; overflow: hidden; }
+#folder-hero-bg { position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+    background-size: cover; background-position: center 22%; opacity: .45; }
+#folder-hero:after { content: ""; position: absolute; left: 0; bottom: 0; width: 100%; height: 220px;
+    background: linear-gradient(transparent, #0b0d12); }
+.fk-logo { position: absolute; left: 70px; bottom: 48px; max-height: 92px; max-width: 430px; z-index: 2; display: block; }
+#folder-hero-title { position: absolute; left: 70px; bottom: 48px; font-size: 64px; font-weight: bold; z-index: 2; }
+#folder-tabs { position: absolute; top: 352px; left: 60px; width: 1860px; white-space: nowrap; }
+.ftab { display: inline-block; font-size: 27px; color: #9aa3b2; padding: 12px 24px; margin-right: 12px;
+    background: #161a24; border-radius: 10px; border: 3px solid transparent; }
+.ftab.active { color: #fff; background: #232838; }
+.ftab.focused { border-color: #ff3d57; color: #fff; }
+#folder-grid { position: absolute; top: 436px; left: 60px; width: 1800px; height: 610px; overflow: hidden; }

@@ -9,8 +9,12 @@ var KEY = { LEFT: 37, UP: 38, RIGHT: 39, DOWN: 40, ENTER: 13, RETURN: 10009,
     BACK: 461, PLAY: 415, PAUSE: 19, STOP: 413, PLAYPAUSE: 10252,
     FF: 417, RW: 412, RED: 403, GREEN: 404, YELLOW: 405, BLUE: 406, INFO: 457 };
 
-var view = 'home';           // home | detail | streams | player | search
-var homeRows = [];           // [{title, items, el, track}]
+var view = 'home';           // home | collection | folder | detail | streams | player | search
+var detailFrom = 'home';     // vista a la que vuelve el detalle
+var homeRows = [];           // [{def, title, items, el, track, loading, done}]
+var homeDefs = [];           // definiciones de filas (/api/home)
+var homeLoaded = 0;
+var homeBatch = 8;
 var homeR = 0, homeC = 0;    // fokus na home
 var detailFocus = [];        // lista fokusowalnych w detalu
 var detailIdx = 0;
@@ -30,7 +34,7 @@ var progressTimer = null;
 function $(id) { return document.getElementById(id); }
 function el(tag, cls, html) { var e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
 function show(v) {
-    var ids = ['login', 'home', 'detail', 'streams', 'player', 'search'];
+    var ids = ['login', 'home', 'detail', 'streams', 'player', 'search', 'collection', 'folder'];
     for (var i = 0; i < ids.length; i++) $('view-' + ids[i]).className = 'view' + (ids[i] === v ? '' : ' hidden');
     view = v;
 }
@@ -105,51 +109,126 @@ var CATS = [
     { id: 'top-tv', title: 'Series mejor valoradas' }
 ];
 
+var SCALE = 1;
+function clearFocusAll() {
+    var f = document.querySelectorAll('.focused');
+    for (var i = 0; i < f.length; i++) f[i].className = f[i].className.replace(' focused', '');
+}
+// mantiene visible el elemento enfocado dentro de su scroller (scrollTop programatico;
+// scrollIntoView no funciona bien dentro del #app escalado en M47)
+function keepVisible(scroller, item) {
+    if (!scroller || !item) return;
+    var sr = scroller.getBoundingClientRect(), ir = item.getBoundingClientRect();
+    var d = 0;
+    if (ir.bottom > sr.bottom - 6) d = (ir.bottom - sr.bottom + 14) / (SCALE || 1);
+    else if (ir.top < sr.top + 6) d = (ir.top - sr.top - 14) / (SCALE || 1);
+    if (d) scroller.scrollTop += Math.round(d);
+}
+
 function buildHome() {
     var container = $('rows');
     container.innerHTML = '';
-    homeRows = [];
-    // Rząd 0: Kontynuuj oglądanie (z konta). Reszta: katalogi TMDB.
-    var rowDefs = [{ id: '__continue__', title: 'Seguir viendo' }].concat(CATS);
-    var pending = rowDefs.length;
-    for (var i = 0; i < rowDefs.length; i++) {
-        (function (def, rowIndex) {
-            var rowEl = el('div', 'row');
-            var title = el('div', 'row-title', def.title);
-            var track = el('div', 'row-track');
-            rowEl.appendChild(title); rowEl.appendChild(track);
-            container.appendChild(rowEl);
-            homeRows[rowIndex] = { title: def.title, items: [], el: rowEl, track: track, continueRow: def.id === '__continue__' };
-            var url = def.id === '__continue__' ? BRIDGE + '/me/continue' : BRIDGE + '/api/catalog/' + def.id;
-            get(url, function (data) {
-                var items = data.items || [];
-                if (def.id === '__continue__') {
-                    // mapuj na format kart + zachowaj dane wznawiania
-                    items = items.map(function (x) {
-                        return { id: x.tmdbId, type: x.type, title: x.title + (x.season ? '  S' + x.season + 'E' + x.episode : ''),
-                            poster: x.poster, pct: x.pct, resume: x };
-                    });
-                    if (!items.length) { rowEl.style.display = 'none'; }
-                }
-                homeRows[rowIndex].items = items;
-                renderRow(rowIndex);
-                pending--; if (pending === 0) focusHome();
-            }, function () { if (def.id === '__continue__') rowEl.style.display = 'none'; pending--; if (pending === 0) focusHome(); });
-        })(rowDefs[i], i);
+    homeRows = []; homeDefs = []; homeLoaded = 0;
+    container.style.transform = 'translateY(0)'; container.style.webkitTransform = 'translateY(0)';
+    homeDefs.push({ kind: 'continue', title: 'Seguir viendo' });
+    loadNextRows();
+    get(BRIDGE + '/api/home', function (d) {
+        var rows = (d && d.rows) || [];
+        for (var i = 0; i < rows.length; i++) homeDefs.push(rows[i]);
+        loadNextRows();
+        if (view === 'home') focusHome();
+    }, function () {
+        for (var c = 0; c < CATS.length; c++) homeDefs.push({ kind: 'legacy', title: CATS[c].title, catalogId: CATS[c].id });
+        loadNextRows();
+        if (view === 'home') focusHome();
+    });
+    setTimeout(function () { if (view === 'home') focusHome(); }, 1500);
+}
+
+function addRowEl(def, index) {
+    var container = $('rows');
+    var rowEl = el('div', 'row' + (def.kind === 'collection' ? ' row-collection' : ''));
+    var title = el('div', 'row-title', def.title || '');
+    var track = el('div', 'row-track');
+    rowEl.appendChild(title); rowEl.appendChild(track);
+    container.appendChild(rowEl);
+    return { def: def, title: def.title || '', items: [], el: rowEl, track: track, loading: false, done: false };
+}
+
+function loadNextRows() {
+    var n = 0;
+    while (homeLoaded < homeDefs.length && n < homeBatch) {
+        var def = homeDefs[homeLoaded];
+        homeRows[homeLoaded] = addRowEl(def, homeLoaded);
+        loadRow(homeLoaded);
+        homeLoaded++; n++;
     }
 }
 
-function renderRow(r) {
-    var row = homeRows[r];
+function loadRow(i) {
+    var row = homeRows[i];
+    if (!row || row.loading || row.done) return;
+    row.loading = true;
+    renderRow(i);
+    var def = row.def, url = null;
+    if (def.kind === 'continue') url = BRIDGE + '/me/continue';
+    else if (def.kind === 'collection') url = BRIDGE + '/api/collection?id=' + encodeURIComponent(def.collectionId);
+    else if (def.kind === 'legacy') url = BRIDGE + '/api/catalog/' + def.catalogId;
+    else if (def.kind === 'catalog') url = BRIDGE + '/api/row?key=' + encodeURIComponent(def.key);
+    if (!url) return;
+    get(url, function (data) {
+        var items = (data && data.items) || [];
+        if (def.kind === 'continue') {
+            items = items.map(function (x) {
+                return { id: x.tmdbId, type: x.type, title: x.title + (x.season ? '  S' + x.season + 'E' + x.episode : ''),
+                    poster: x.poster, pct: x.pct, resume: x };
+            });
+        } else if (def.kind === 'collection') {
+            var folders = (data && data.folders) || [];
+            items = folders.map(function (f) {
+                return { folder: true, id: f.id, title: f.title, cover: f.coverImageUrl || f.focusGifUrl || '',
+                    logo: f.titleLogoUrl || '' };
+            });
+        } else {
+            items = items.filter(function (x) { return x && (x.type === 'movie' || x.type === 'series'); });
+        }
+        row.items = items; row.loading = false; row.done = true;
+        renderRow(i);
+        if (view === 'home') setHomeFocus(homeR, homeC);
+    }, function () { row.loading = false; row.done = true; renderRow(i); });
+}
+
+function renderRow(i) {
+    var row = homeRows[i];
+    if (!row) return;
     row.track.innerHTML = '';
-    for (var i = 0; i < row.items.length; i++) {
-        var it = row.items[i];
-        var card = el('div', 'card');
-        if (it.poster) { var im = el('img'); im.src = it.poster; card.appendChild(im); }
-        else card.appendChild(el('div', 'noimg', it.title));
-        if (it.rating) card.appendChild(el('div', 'badge', it.rating));
-        if (it.pct) { var pr = el('div', 'progress'); pr.style.width = it.pct + '%'; card.appendChild(pr); }
-        card.appendChild(el('div', 'cap', it.title));
+    if (row.loading && !row.items.length) {
+        row.track.appendChild(el('div', 'card loading-card', '<div class="spin small"></div>'));
+        return;
+    }
+    if (!row.items.length) {
+        if (row.def.kind === 'continue') row.el.style.display = 'none';
+        else row.track.appendChild(el('div', 'row-empty', '(sin contenido)'));
+        return;
+    }
+    for (var k = 0; k < row.items.length; k++) {
+        var it = row.items[k];
+        var card;
+        if (it.folder) {
+            card = el('div', 'card folder-card-sm');
+            if (it.cover) { var im2 = el('img'); im2.src = it.cover; card.appendChild(im2); }
+            var ov = el('div', 'fc-overlay');
+            if (it.logo) { var lg = el('img', 'fc-logo'); lg.src = it.logo; ov.appendChild(lg); }
+            else ov.appendChild(el('div', 'fc-title', esc(it.title)));
+            card.appendChild(ov);
+        } else {
+            card = el('div', 'card');
+            if (it.poster) { var im = el('img'); im.src = it.poster; card.appendChild(im); }
+            else card.appendChild(el('div', 'noimg', esc(it.title)));
+            if (it.rating) card.appendChild(el('div', 'badge', it.rating));
+            if (it.pct) { var pr = el('div', 'progress'); pr.style.width = it.pct + '%'; card.appendChild(pr); }
+            card.appendChild(el('div', 'cap', esc(it.title)));
+        }
         row.track.appendChild(card);
     }
 }
@@ -157,39 +236,201 @@ function renderRow(r) {
 function focusHome() {
     loader(false);
     if (homeR >= homeRows.length) homeR = 0;
+    var guard = 0;
+    while (homeRows[homeR] && homeRows[homeR].done && !homeRows[homeR].items.length && guard < homeRows.length) { homeR++; guard++; }
+    if (homeR >= homeRows.length) homeR = 0;
     setHomeFocus(homeR, homeC);
-}
-
-function clearFocusAll() {
-    var f = document.querySelectorAll('.focused');
-    for (var i = 0; i < f.length; i++) f[i].className = f[i].className.replace(' focused', '');
 }
 
 function setHomeFocus(r, c) {
     clearFocusAll();
-    if (!homeRows[r] || !homeRows[r].items.length) return;
+    if (!homeRows[r]) return;
+    if (r >= homeLoaded - 3) loadNextRows();
+    if (!homeRows[r].items.length) {
+        var dir = r > homeR ? 1 : -1, rr = r, guard = 0;
+        while (homeRows[rr] && !homeRows[rr].items.length && guard < homeRows.length) { rr += dir; guard++; }
+        if (!homeRows[rr] || rr < 0) return;
+        r = rr;
+    }
     if (c >= homeRows[r].items.length) c = homeRows[r].items.length - 1;
     if (c < 0) c = 0;
     homeR = r; homeC = c;
     var cards = homeRows[r].track.childNodes;
-    if (cards[c]) {
-        cards[c].className = 'card focused';
-        // przewijanie w poziomie
-        homeRows[r].track.style.marginLeft = (-c * 242) + 'px';
-        // przewijanie pionowe: przesuń rzędy tak by aktywny był widoczny
-        $('rows').style.marginTop = (-Math.max(0, r) * 0) + 'px';
-        scrollRowsTo(r);
-    }
+    if (!cards[c]) return;
+    var isFolder = !!(homeRows[r].items[c] && homeRows[r].items[c].folder);
+    cards[c].className = isFolder ? 'card folder-card-sm focused' : 'card focused';
+    homeRows[r].track.style.marginLeft = (-c * (isFolder ? 470 : 242)) + 'px';
+    scrollRowsTo(r);
 }
 
 function scrollRowsTo(r) {
-    var offset = r > 1 ? -(r - 1) * 398 : 0;
-    $('rows').style.webkitTransform = 'translateY(' + offset + 'px)';
-    $('rows').style.transform = 'translateY(' + offset + 'px)';
+    var row = homeRows[r];
+    var off = row ? Math.max(0, row.el.offsetTop - 110) : 0;
+    $('rows').style.webkitTransform = 'translateY(' + (-off) + 'px)';
+    $('rows').style.transform = 'translateY(' + (-off) + 'px)';
+}
+
+// ---------- Colecciones y carpetas ----------
+var curColl = null, curCollId = null, curFolder = null;
+var curTabs = [], curTab = 0, folderItems = [], folderCache = {};
+var collIdx = 0, collCols = 4, gridIdx = 0, gridCols = 7;
+var folderArea = 'grid', tabFocus = 0;
+
+function openCollection(cid, title) {
+    curCollId = cid;
+    if (curColl && curColl.id === cid && (curColl.folders || []).length) { renderCollection(); show('collection'); return; }
+    loader(true, 'Cargando colecci\u00f3n...');
+    get(BRIDGE + '/api/collection?id=' + encodeURIComponent(cid), function (d) {
+        curColl = d || {}; curColl.id = curColl.id || cid;
+        if (!curColl.title && title) curColl.title = title;
+        renderCollection(); loader(false); show('collection');
+    }, function () { loader(false); });
+}
+
+function renderCollection() {
+    $('coll-title').innerHTML = esc(curColl.title || 'Colecci\u00f3n');
+    var g = $('coll-grid'); g.innerHTML = '';
+    var folders = curColl.folders || [];
+    for (var i = 0; i < folders.length; i++) {
+        var f = folders[i];
+        var card = el('div', 'folder-card');
+        var img = f.coverImageUrl || f.focusGifUrl || '';
+        if (img) { var im = el('img'); im.src = img; card.appendChild(im); }
+        var ov = el('div', 'fc-overlay');
+        if (f.titleLogoUrl) { var lg = el('img', 'fc-logo'); lg.src = f.titleLogoUrl; ov.appendChild(lg); }
+        else ov.appendChild(el('div', 'fc-title', esc(f.title)));
+        card.appendChild(ov);
+        g.appendChild(card);
+    }
+    focusCollection(0);
+}
+
+function focusCollection(i) {
+    clearFocusAll();
+    var cards = $('coll-grid').childNodes;
+    if (!cards.length) return;
+    if (i < 0) i = 0;
+    if (i >= cards.length) i = cards.length - 1;
+    collIdx = i;
+    cards[i].className = 'folder-card focused';
+    keepVisible($('coll-grid'), cards[i]);
+}
+
+function keyCollection(k) {
+    var n = $('coll-grid').childNodes.length;
+    if (!n) { if (k === KEY.RETURN || k === KEY.BACK) show('home'); return; }
+    if (k === KEY.RIGHT) focusCollection(collIdx + 1);
+    else if (k === KEY.LEFT) focusCollection(collIdx - 1);
+    else if (k === KEY.DOWN) focusCollection(collIdx + collCols);
+    else if (k === KEY.UP) { if (collIdx < collCols) show('home'); else focusCollection(collIdx - collCols); }
+    else if (k === KEY.ENTER) { var f = (curColl.folders || [])[collIdx]; if (f) openFolder(curColl.id, f); }
+    else if (k === KEY.RETURN || k === KEY.BACK) show('home');
+}
+
+function openFolder(cid, f) {
+    curCollId = cid;
+    loader(true, 'Cargando ' + f.title + '...');
+    get(BRIDGE + '/api/folder?cid=' + encodeURIComponent(cid) + '&fid=' + encodeURIComponent(f.id), function (d) {
+        curFolder = (d && d.folder) || { id: f.id, title: f.title };
+        curFolder.cid = cid;
+        curTabs = (d && d.tabs) || [];
+        curTab = 0; tabFocus = 0; folderArea = 'grid'; gridIdx = 0;
+        var bg = curFolder.heroBackdropUrl || f.coverImageUrl || f.cover || '';
+        $('folder-hero-bg').style.backgroundImage = bg ? 'url(' + bg + ')' : 'none';
+        var logo = $('folder-hero-logo');
+        var logoUrl = f.titleLogoUrl || f.logo || '';
+        if (logoUrl) { logo.src = logoUrl; logo.className = 'fk-logo'; $('folder-hero-title').innerHTML = ''; }
+        else { logo.className = 'hidden'; $('folder-hero-title').innerHTML = esc(f.title); }
+        renderFolderTabs();
+        loadTab(0);
+        if (!curColl || curColl.id !== cid) {
+            get(BRIDGE + '/api/collection?id=' + encodeURIComponent(cid), function (dc) { if (dc && dc.id) curColl = dc; }, function () {});
+        }
+        loader(false); show('folder');
+    }, function () { loader(false); });
+}
+
+function renderFolderTabs() {
+    var t = $('folder-tabs'); t.innerHTML = '';
+    for (var i = 0; i < curTabs.length; i++) {
+        var cls = 'ftab' + (i === curTab ? ' active' : '') + (folderArea === 'tabs' && i === tabFocus ? ' focused' : '');
+        t.appendChild(el('div', cls, esc(curTabs[i].title)));
+    }
+    t.style.marginLeft = (-Math.max(0, tabFocus - 3) * 250) + 'px';
+}
+
+function loadTab(i) {
+    curTab = i;
+    renderFolderTabs();
+    var ckey = (curFolder ? curFolder.id : '') + '|' + i;
+    if (folderCache[ckey]) { folderItems = folderCache[ckey]; renderFolderGrid(); return; }
+    folderItems = [];
+    $('folder-grid').innerHTML = '<div class="grid-loading">Cargando\u2026</div>';
+    get(BRIDGE + '/api/folderitems?cid=' + encodeURIComponent(curFolder.cid) + '&fid=' + encodeURIComponent(curFolder.id) + '&tab=' + i + '&skip=0',
+        function (d) {
+            folderItems = (d && d.items) || [];
+            folderCache[ckey] = folderItems;
+            if (curTab === i) renderFolderGrid();
+        }, function () { if (curTab === i) $('folder-grid').innerHTML = '<div class="grid-loading">Error al cargar la pesta\u00f1a.</div>'; });
+}
+
+function renderFolderGrid() {
+    var g = $('folder-grid'); g.innerHTML = '';
+    if (!folderItems.length) { g.innerHTML = '<div class="grid-loading">Sin contenido.</div>'; return; }
+    for (var i = 0; i < folderItems.length; i++) {
+        var it = folderItems[i];
+        var card = el('div', 'card');
+        if (it.poster) { var im = el('img'); im.src = it.poster; card.appendChild(im); }
+        else card.appendChild(el('div', 'noimg', esc(it.title)));
+        if (it.rating) card.appendChild(el('div', 'badge', it.rating));
+        card.appendChild(el('div', 'cap', esc(it.title)));
+        g.appendChild(card);
+    }
+    gridIdx = 0; focusGrid(0);
+}
+
+function focusGrid(i) {
+    folderArea = 'grid';
+    clearFocusAll();
+    var cards = $('folder-grid').childNodes;
+    if (!cards.length || !cards[0].className) return;
+    if (i < 0) i = 0;
+    if (i >= cards.length) i = cards.length - 1;
+    gridIdx = i;
+    cards[i].className = 'card focused';
+    keepVisible($('folder-grid'), cards[i]);
+}
+
+function keyFolder(k) {
+    if (k === KEY.RETURN || k === KEY.BACK) {
+        if (curColl) { renderCollection(); show('collection'); } else show('home');
+        return;
+    }
+    if (folderArea === 'tabs') {
+        if (k === KEY.LEFT) focusTab(tabFocus - 1);
+        else if (k === KEY.RIGHT) focusTab(tabFocus + 1);
+        else if (k === KEY.DOWN || k === KEY.ENTER) { loadTab(tabFocus); }
+        return;
+    }
+    var n = folderItems.length;
+    if (k === KEY.RIGHT) { if (gridIdx < n - 1) focusGrid(gridIdx + 1); }
+    else if (k === KEY.LEFT) { if (gridIdx > 0) focusGrid(gridIdx - 1); }
+    else if (k === KEY.DOWN) { if (gridIdx + gridCols < n) focusGrid(gridIdx + gridCols); }
+    else if (k === KEY.UP) { if (gridIdx < gridCols) { folderArea = 'tabs'; tabFocus = curTab; renderFolderTabs(); } else focusGrid(gridIdx - gridCols); }
+    else if (k === KEY.ENTER) { if (n) openDetail(folderItems[gridIdx]); }
+}
+
+function focusTab(i) {
+    folderArea = 'tabs';
+    if (i < 0) i = 0;
+    if (i >= curTabs.length) i = curTabs.length - 1;
+    tabFocus = i;
+    renderFolderTabs();
 }
 
 // ---------- Szczegóły ----------
 function openDetail(item) {
+    if (view !== 'detail') detailFrom = view;
     resumeMs = 0; pendingSeekMs = 0;   // świeży tytuł = odtwarzanie od początku (nie dziedzicz pozycji wznawiania)
     loader(true, 'Cargando detalles...');
     get(BRIDGE + '/api/meta/' + item.type + '/' + item.id, function (meta) {
@@ -272,7 +513,8 @@ function focusDetail(i) {
     if (detailFocus[i]) {
         var e = detailFocus[i].el;
         e.className += ' focused';
-        if (e.scrollIntoView) { try { e.scrollIntoView(false); } catch (x) {} }
+        if (e.parentNode && e.parentNode.className === 'ep-list') keepVisible($('detail-episodes'), e);
+        else if (e.scrollIntoView) { try { e.scrollIntoView(false); } catch (x) {} }
     }
 }
 
@@ -341,7 +583,7 @@ function setStreamFocus(i) {
     streamIdx = i;
     if (rows[i] && rows[i].className !== undefined) {
         rows[i].className = 'stream focused';
-        if (rows[i].scrollIntoView) { try { rows[i].scrollIntoView(false); } catch (x) {} }
+        keepVisible($('streams-list'), rows[i]);
     }
 }
 
@@ -559,6 +801,9 @@ function renderTrackMenu() {
         var cls2 = 'tm-item' + (menuCol === 1 && menuIdx === j ? ' focused' : '') + (act ? ' active' : '');
         sL.appendChild(el('div', cls2, esc(sItems[j].label)));
     }
+    var box = (menuCol === 0) ? aL : sL;
+    var foc = box.childNodes[Math.min(menuIdx, box.childNodes.length - 1)];
+    keepVisible(box, foc);
 }
 var curAudioIndex = -1, curSubKey = 'off';
 function menuLen(col) { return col === 0 ? Math.max(1, audioTracks.length) : subItems().length; }
@@ -725,6 +970,8 @@ function onKey(e) {
     var k = e.keyCode;
     if (view === 'login') { if (k === KEY.RETURN || k === KEY.BACK) exitApp(); return; }
     if (view === 'home') return keyHome(k);
+    if (view === 'collection') return keyCollection(k);
+    if (view === 'folder') return keyFolder(k);
     if (view === 'detail') return keyDetail(k);
     if (view === 'streams') return keyStreams(k);
     if (view === 'player') return keyPlayer(k);
@@ -740,7 +987,9 @@ function keyHome(k) {
     else if (k === KEY.UP) setHomeFocus(homeR > 0 ? homeR - 1 : 0, homeC);
     else if (k === KEY.ENTER) {
         var it = homeRows[homeR] && homeRows[homeR].items[homeC];
-        if (it && it.resume) resumeItem(it.resume);
+        var def = homeRows[homeR] && homeRows[homeR].def;
+        if (it && it.folder && def && def.collectionId) openFolder(def.collectionId, it);
+        else if (it && it.resume) resumeItem(it.resume);
         else if (it) openDetail(it);
     }
     else if (k === KEY.RETURN || k === KEY.BACK) exitApp();
@@ -752,7 +1001,14 @@ function keyDetail(k) {
     else if (k === KEY.RIGHT) focusDetail(detailIdx + 1);
     else if (k === KEY.LEFT) focusDetail(detailIdx - 1);
     else if (k === KEY.ENTER) { if (detailFocus[detailIdx]) detailFocus[detailIdx].action(); }
-    else if (k === KEY.RETURN || k === KEY.BACK) show('home');
+    else if (k === KEY.RETURN || k === KEY.BACK) {
+        var f = detailFrom || 'home';
+        show(f);
+        if (f === 'folder') { folderArea = 'grid'; focusGrid(gridIdx); }
+        else if (f === 'collection') focusCollection(collIdx);
+        else if (f === 'home') focusHome();
+        else if (f === 'search') setSearchFocus(searchIdx);
+    }
 }
 
 function keyStreams(k) {
@@ -818,6 +1074,7 @@ function fitScreen() {
     var s = Math.min(w / 1920, h / 1080) * SAFE;
     var tx = Math.round((w - 1920 * s) / 2), ty = Math.round((h - 1080 * s) / 2);
     var appEl = $('app');
+    SCALE = s;
     var tr = 'translate(' + tx + 'px,' + ty + 'px) scale(' + s + ')';
     appEl.style.webkitTransform = tr;
     appEl.style.transform = tr;
