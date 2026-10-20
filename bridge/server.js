@@ -245,6 +245,37 @@ async function getUserPlugins() {
     .filter(x => x.url);
 }
 
+function readJsonBody(req) {
+  return new Promise(resolve => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (e) { resolve({}); } });
+    req.on('error', () => resolve({}));
+  });
+}
+function mapLibraryRow(x) {
+  return { id: x.content_id || x.contentId || '', type: (x.content_type || x.contentType) === 'series' ? 'series' : 'movie',
+    title: x.name || x.title || '', poster: x.poster || '', backdrop: x.background || '',
+    overview: x.description || '', year: String(x.release_info || x.releaseInfo || '').slice(0, 4),
+    rating: x.imdb_rating != null ? Number(x.imdb_rating) : null,
+    genres: Array.isArray(x.genres) ? x.genres : [], addedAt: Number(x.added_at || x.addedAt) || Date.now() };
+}
+function toLibraryRow(i) {
+  return { content_id: i.id || i.content_id, content_type: i.type || i.content_type || 'movie',
+    name: i.title || i.name || '', poster: i.poster || null,
+    poster_shape: String(i.posterShape || i.poster_shape || 'POSTER').toUpperCase(),
+    background: i.backdrop || i.background || null, description: i.overview || i.description || '',
+    release_info: i.year || i.release_info || '',
+    imdb_rating: i.rating == null && i.imdb_rating == null ? null : Number(i.rating != null ? i.rating : i.imdb_rating),
+    genres: i.genres || [], addon_base_url: i.addonBaseUrl || i.addon_base_url || null,
+    added_at: Number(i.addedAt || i.added_at) || Date.now() };
+}
+function mapWatchedRow(x) {
+  return { id: x.content_id || x.contentId || '', type: (x.content_type || x.contentType) === 'series' ? 'series' : 'movie',
+    title: x.title || x.name || '', season: x.season == null ? null : Number(x.season),
+    episode: x.episode == null ? null : Number(x.episode), watchedAt: Number(x.watched_at || x.watchedAt) || 0 };
+}
+
 async function pushProgress(p) {
   const tok = await userToken(); if (!tok) return false;
   if (ACC.profileIndex == null) await resolveProfile();
@@ -362,6 +393,128 @@ function findManifest(mc, addonId) {
     mc.list.find(r => r.name === addonId) ||
     mc.list.find(r => String(r.id).indexOf(String(addonId)) === 0 || String(addonId).indexOf(String(r.id)) === 0) || null;
 }
+
+// Tipos nativos de Stremio (movie/series/channel/sport/tv/collection/anime.*) — no colapsar a movie.
+const KNOWN_TYPES = { movie: 'movie', series: 'series', tv: 'tv', channel: 'channel', sport: 'sport', collection: 'collection', anime: 'series', 'anime.movie': 'movie', 'anime.series': 'series' };
+function nativeType(value, fallback) {
+  const t = String(value || fallback || '').toLowerCase();
+  return KNOWN_TYPES[t] || (t || 'movie');
+}
+function addonResources(m) {
+  return (m.resources || []).map(r => typeof r === 'string' ? r : r.name);
+}
+function addonSupports(m, resource, type, id) {
+  if (addonResources(m).indexOf(resource) < 0) return false;
+  const spec = (m.resources || []).find(r => typeof r !== 'string' && r.name === resource);
+  if (spec) {
+    const types = spec.types || [];
+    if (types.length && types.indexOf(type) < 0) return false;
+    const prefixes = spec.idPrefixes || [];
+    if (prefixes.length && id && !prefixes.some(p => String(id).indexOf(p) === 0)) return false;
+  } else if ((m.types || []).length && type !== 'movie' && type !== 'series' && (m.types || []).indexOf(type) < 0) {
+    return false;
+  }
+  return true;
+}
+function mapAddonMeta(m, addonId, reqType) {
+  const type = nativeType(m.type, reqType);
+  const videos = Array.isArray(m.videos) ? m.videos : [];
+  const seasons = {};
+  videos.forEach(v => {
+    const sn = Number(v.season);
+    if (!sn || sn < 1) return;
+    (seasons[sn] = seasons[sn] || []).push({
+      episode: Number(v.episode) || 0,
+      name: v.name || v.title || ('Episodio ' + v.episode),
+      overview: v.overview || '',
+      still: v.thumbnail || '',
+      released: v.released || ''
+    });
+  });
+  const out = {
+    id: m.id || '', type,
+    title: m.name || m.title || '',
+    overview: m.description || m.overview || '',
+    poster: m.poster || m.landscapePoster || '',
+    backdrop: m.background || m.backdrop || '',
+    logo: m.logo || '',
+    year: String(m.releaseInfo || m.year || '').slice(0, 4),
+    rating: m.imdbRating != null ? Number(m.imdbRating) : null,
+    runtime: m.runtime || null,
+    genres: Array.isArray(m.genre) ? m.genre : (Array.isArray(m.genres) ? m.genres : []),
+    addonId: addonId || null
+  };
+  const keys = Object.keys(seasons).map(Number).sort((a, b) => a - b);
+  if (keys.length) {
+    out.seasons = keys.map(sn => ({ season: sn, name: 'Temporada ' + sn, episodes: seasons[sn].length }));
+    out._episodes = seasons;
+  }
+  if (m.collection) out.collection = m.collection;
+  return out;
+}
+const ADDON_META_CACHE = {};
+async function fetchAddonMeta(type, id) {
+  const ck = type + '|' + id;
+  const cc = ADDON_META_CACHE[ck];
+  if (cc && Date.now() - cc.ts < 600000) return cc.data;
+  const mc = await getAllManifests();
+  const candidates = mc.list.filter(m => addonSupports(m, 'meta', type, id));
+  console.log('[addon-meta]', type, id.slice(0, 32), 'candidatos:', candidates.map(m => m.id).join(',') || 'ninguno');
+  for (const m of candidates) {
+    try {
+      const j = await withTimeout(getJSON(`${m.base}/meta/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`), 12000, m.name);
+      if (j && j.meta && (j.meta.name || j.meta.title)) {
+        const data = mapAddonMeta(j.meta, m.id, type);
+        ADDON_META_CACHE[ck] = { ts: Date.now(), data };
+        return data;
+      }
+    } catch (e) { console.log('[addon-meta]', m.name, e.message); }
+  }
+  return null;
+}
+function mapStreamItem(s, a) {
+  const ph = s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request;
+  const desc = (s.description || s.title || s.name || '').toString();
+  const fn = (s.behaviorHints && s.behaviorHints.filename) || '';
+  let sizeBytes = (s.behaviorHints && s.behaviorHints.videoSize) || 0;
+  if (!sizeBytes) { const m = desc.match(/([\d.]+)\s?(GB|MB)/i); if (m) sizeBytes = parseFloat(m[1]) * (m[2].toUpperCase() === 'GB' ? 1073741824 : 1048576); }
+  const base = {
+    provider: a.name, name: (s.name || a.name).toString().replace(/\n/g, ' '), _addon: true,
+    title: ((s.name || a.name) + (fn ? '  · ' + fn : '')).toString().replace(/\n/g, ' '),
+    desc: desc,
+    size: sizeBytes || null,
+    quality: qualFromText(desc + ' ' + (s.name || '') + ' ' + fn),
+    fn: fn, headers: ph || s.headers || null
+  };
+  if (s.url) { base.url = s.url; base.kind = 'direct'; return base; }
+  if (s.infoHash) {
+    const trackers = (s.sources || []).filter(x => /^tracker:/.test(x)).map(x => x.slice(8));
+    base.kind = 'torrent'; base.infoHash = s.infoHash;
+    base.magnet = magnetWithTrackers(s.infoHash, fn || base.title || 'video', trackers);
+    base.fileIdx = (typeof s.fileIdx === 'number') ? s.fileIdx : null;
+    return base;
+  }
+  if (s.externalUrl) { base.kind = 'external'; base.externalUrl = s.externalUrl; return base; }
+  return null;
+}
+async function fetchAddonStreamsNative(type, id) {
+  const mc = await getAllManifests();
+  const usable = mc.list.filter(m => addonSupports(m, 'stream', type, id));
+  console.log('[addon-live]', type, id.slice(0, 32), 'addons:', usable.map(m => m.id).join(',') || 'ninguno');
+  const jobs = usable.map(async m => {
+    try {
+      const j = await withTimeout(getJSON(`${m.base}/stream/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`), 20000, m.name);
+      return ((j && j.streams) || []).map(s => mapStreamItem(s, m)).filter(Boolean);
+    } catch (e) { console.log('[addon-live]', m.name, e.message); return []; }
+  });
+  const res = await Promise.all(jobs);
+  const all = [].concat.apply([], res);
+  all.forEach(x => {
+    x.live = true;
+    x.hls = /\.m3u8(\?|$)/i.test(x.url || '') || type === 'channel' || type === 'tv';
+  });
+  return all;
+}
 async function getCollectionsBlob() {
   const tok = await userToken(); if (!tok) throw new Error('sin sesión');
   if (ACC.profileIndex == null) await resolveProfile();
@@ -401,21 +554,25 @@ async function getHomeRows() {
   }
   return { rows: out };
 }
-async function fetchAddonCatalog(addonId, type, catalogId, genre, skip) {
+async function fetchAddonCatalog(addonId, type, catalogId, genre, skip, page) {
   const mc = await getAllManifests();
   const m = findManifest(mc, addonId);
   if (!m) throw new Error('addon no encontrado: ' + addonId);
   const extras = [];
   if (genre && genre !== 'None') extras.push('genre=' + encodeURIComponent(genre));
   if (skip) extras.push('skip=' + encodeURIComponent(skip));
+  if (page) extras.push('page=' + encodeURIComponent(page));
   const url = m.base + '/catalog/' + type + '/' + catalogId + (extras.length ? '/' + extras.join('&') : '') + '.json';
   const j = await withTimeout(getJSON(url), 25000, m.name);
   const metas = (j && j.metas) || [];
   return metas.map(x => ({
     id: String(x.id || ''),
-    type: (String(x.type || type) === 'series' || String(x.type) === 'tv') ? 'series' : 'movie',
+    type: nativeType(x.type, type),
     title: x.name || x.title || '',
-    poster: x.poster || '',
+    poster: x.poster || x.landscapePoster || '',
+    background: x.background || '',
+    logo: x.logo || '',
+    posterShape: x.posterShape || '',
     year: x.releaseInfo ? String(x.releaseInfo).slice(0, 4) : '',
     rating: x.imdbRating || null
   })).filter(x => x.id && x.title);
@@ -486,31 +643,7 @@ async function addonStreams(type, tmdbId, season, episode) {
   const jobs = usable.map(async a => {
     try {
       const j = await withTimeout(getJSON(`${a.base}/stream/${stType}/${encodeURIComponent(vid)}.json`), 30000, a.name);
-      return (j.streams || []).map(s => {
-        const ph = s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request;
-        const desc = (s.description || s.title || s.name || '').toString();
-        const fn = (s.behaviorHints && s.behaviorHints.filename) || '';
-        let sizeBytes = (s.behaviorHints && s.behaviorHints.videoSize) || 0;
-        if (!sizeBytes) { const m = desc.match(/([\d.]+)\s?(GB|MB)/i); if (m) sizeBytes = parseFloat(m[1]) * (m[2].toUpperCase() === 'GB' ? 1073741824 : 1048576); }
-        const base = {
-          provider: a.name, name: (s.name || a.name).toString().replace(/\n/g, ' '), _addon: true,
-          title: ((s.name || a.name) + (fn ? '  · ' + fn : '')).toString().replace(/\n/g, ' '),
-          desc: desc,
-          size: sizeBytes || null,
-          quality: qualFromText(desc + ' ' + (s.name || '') + ' ' + fn),
-          fn: fn, headers: ph || s.headers || null
-        };
-        if (s.url) { base.url = s.url; base.kind = 'direct'; return base; }
-        if (s.infoHash) {
-          const trackers = (s.sources || []).filter(x => /^tracker:/.test(x)).map(x => x.slice(8));
-          base.kind = 'torrent'; base.infoHash = s.infoHash;
-          base.magnet = magnetWithTrackers(s.infoHash, fn || base.title || 'video', trackers);
-          base.fileIdx = (typeof s.fileIdx === 'number') ? s.fileIdx : null;
-          return base;
-        }
-        if (s.externalUrl) { base.kind = 'external'; base.externalUrl = s.externalUrl; return base; }
-        return null;
-      }).filter(Boolean);
+      return (j.streams || []).map(s => mapStreamItem(s, a)).filter(Boolean);
     } catch (e) { console.log('[addon-stream]', a.name, e.message); return []; }
   });
   const res = await Promise.all(jobs);
@@ -782,6 +915,34 @@ function send(res, code, obj, headers) {
   res.end(body);
 }
 
+function buildStreamOut(req, list) {
+  const host = req.headers.host;
+  return list.map(s => {
+    let playUrl;
+    if (s.kind === 'torrent') {
+      playUrl = `http://${host}/api/torrent?m=${encodeURIComponent(s.magnet)}` + (s.fileIdx != null ? `&ix=${s.fileIdx}` : '') + (s.fn ? `&fn=${encodeURIComponent(s.fn)}` : '');
+    } else if (s.url) {
+      const h = (s.headers && Object.keys(s.headers).length) ? Buffer.from(JSON.stringify(s.headers)).toString('base64') : '';
+      const isHls = !!s.hls || /\.m3u8(\?|$)/i.test(s.url) || /\.m3u8(\?|$)/i.test(String(s.direct || ''));
+      playUrl = `http://${host}/api/proxy?u=${encodeURIComponent(s.url)}` + (isHls ? '&hls=1' : '') + (h ? `&h=${encodeURIComponent(h)}` : '');
+    } else {
+      playUrl = s.externalUrl || '';
+    }
+    return {
+      provider: cleanEmoji(s.provider || s.name || ''),
+      title: cleanEmoji(s.title || s.name || 'Stream'),
+      desc: cleanEmoji(s.desc || ''),
+      size: s.size || null,
+      quality: s.quality || '',
+      kind: s.kind || 'direct',
+      hls: !!s.hls,
+      live: !!s.live,
+      url: playUrl,
+      direct: s.url || s.magnet || ''
+    };
+  });
+}
+
 async function handleApi(req, res, u) {
   const parts = u.pathname.split('/').filter(Boolean); // ['api', ...]
   const seg = parts.slice(1);
@@ -816,10 +977,18 @@ async function handleApi(req, res, u) {
     return send(res, 200, { items });
   }
 
-  // /api/meta/:type/:id  (acepta id TMDB numérico, tt… y tmdb:…)
+  // /api/meta/:type/:id  (TMDB para movie/series; meta del addon para channel/sport/collection/tv/anime y fallback)
   if (seg[0] === 'meta') {
-    let type = seg[1] === 'series' ? 'tv' : 'movie';
-    let id = seg[2];
+    const reqType = String(seg[1] || '').toLowerCase();
+    const rawId = decodeURIComponent(seg[2] || '');
+    if (reqType !== 'movie' && reqType !== 'series') {
+      const am = await fetchAddonMeta(reqType, rawId);
+      if (!am) return send(res, 404, { error: 'meta no encontrada: ' + reqType + '/' + rawId });
+      return send(res, 200, am);
+    }
+    let type = reqType === 'series' ? 'tv' : 'movie';
+    let id = rawId;
+    try {
     if (/^tt\d+$/i.test(id)) {
       const f = await getJSON(`${TMDB}/find/${id}?api_key=${TMDB_KEY}&external_source=imdb_id&language=${LANG}`);
       const mv = (f.movie_results || [])[0], tv = (f.tv_results || [])[0];
@@ -835,6 +1004,7 @@ async function handleApi(req, res, u) {
       year: (j.release_date || j.first_air_date || '').slice(0, 4),
       poster: poster(j.poster_path), backdrop: backdrop(j.backdrop_path),
       rating: j.vote_average ? Math.round(j.vote_average * 10) / 10 : null,
+      imdb: j.imdb_id || (j.external_ids && j.external_ids.imdb_id) || null,
       runtime: j.runtime || (j.episode_run_time && j.episode_run_time[0]) || null,
       genres: (j.genres || []).map(g => g.name)
     };
@@ -843,11 +1013,20 @@ async function handleApi(req, res, u) {
         .map(s => ({ season: s.season_number, name: s.name, episodes: s.episode_count }));
     }
     return send(res, 200, meta);
+    } catch (e) {
+      const am = await fetchAddonMeta(reqType, rawId);
+      if (am) return send(res, 200, am);
+      throw e;
+    }
   }
 
   // /api/episodes/:id/:season
   if (seg[0] === 'episodes') {
-    const id = seg[1], season = seg[2];
+    const id = decodeURIComponent(seg[1] || ''), season = seg[2];
+    const cached = ADDON_META_CACHE['series|' + id] || ADDON_META_CACHE['tv|' + id];
+    if (cached && cached.data && cached.data._episodes) {
+      return send(res, 200, { season: Number(season), episodes: cached.data._episodes[season] || [] });
+    }
     const j = await getJSON(`${TMDB}/tv/${id}/season/${season}?api_key=${TMDB_KEY}&language=${LANG}`);
     const eps = (j.episodes || []).map(e => ({
       episode: e.episode_number, name: e.name || ('Odcinek ' + e.episode_number),
@@ -867,7 +1046,7 @@ async function handleApi(req, res, u) {
     const key = u.searchParams.get('key') || '';
     const parts = key.split(':');
     if (parts.length < 3) return send(res, 400, { error: 'key inválida' });
-    const items = await fetchAddonCatalog(parts[0], parts[1], parts.slice(2).join(':'), u.searchParams.get('genre'), u.searchParams.get('skip'));
+    const items = await fetchAddonCatalog(parts[0], parts[1], parts.slice(2).join(':'), u.searchParams.get('genre'), u.searchParams.get('skip'), u.searchParams.get('page'));
     return send(res, 200, { items });
   }
 
@@ -926,9 +1105,15 @@ async function handleApi(req, res, u) {
 
   // /api/streams/:type/:id?season=&episode=
   if (seg[0] === 'streams') {
-    const type = seg[1], id = seg[2];
+    const type = String(seg[1] || '').toLowerCase(), id = decodeURIComponent(seg[2] || '');
     const season = u.searchParams.get('season');
     const episode = u.searchParams.get('episode');
+    if (type !== 'movie' && type !== 'series') {
+      const live = await fetchAddonStreamsNative(type, id).catch(e => { console.log('[live]', e.message); return []; });
+      if (!live.length) return send(res, 200, { streams: [], live: true });
+      live.sort((a, b) => (b.quality || '').localeCompare(a.quality || ''));
+      return send(res, 200, { streams: buildStreamOut(req, live.slice(0, 40)), live: true });
+    }
     // Streams z addonów Nuvio (AIOStreams/Torrentio/TorrentClaw...) + zapasowo providery (cap global 25s).
     const [fromAddons, fromProviders] = await Promise.all([
       addonStreams(type, id, season, episode).catch(() => []),
@@ -951,27 +1136,7 @@ async function handleApi(req, res, u) {
     if (!provOk.length) provOk = toCheck;
     provOk.sort((a, b) => tvScore(b) - tvScore(a));
     streams = streams.concat(provOk.map(s => { if (!s.kind) s.kind = 'direct'; return s; }));
-    const host = req.headers.host;
-    const out = streams.map(s => {
-      let playUrl;
-      if (s.kind === 'torrent') {
-        playUrl = `http://${host}/api/torrent?m=${encodeURIComponent(s.magnet)}` + (s.fileIdx != null ? `&ix=${s.fileIdx}` : '') + (s.fn ? `&fn=${encodeURIComponent(s.fn)}` : '');
-      } else {
-        const h = (s.headers && Object.keys(s.headers).length) ? Buffer.from(JSON.stringify(s.headers)).toString('base64') : '';
-        playUrl = `http://${host}/api/proxy?u=${encodeURIComponent(s.url)}` + (h ? `&h=${encodeURIComponent(h)}` : '');
-      }
-      return {
-        provider: cleanEmoji(s.provider || s.name || ''),
-        title: cleanEmoji(s.title || s.name || 'Stream'),
-        desc: cleanEmoji(s.desc || ''),
-        size: s.size || null,
-        quality: s.quality || '',
-        kind: s.kind || 'direct',
-        url: playUrl,
-        direct: s.url || s.magnet || ''
-      };
-    });
-    return send(res, 200, { streams: out });
+    return send(res, 200, { streams: buildStreamOut(req, streams) });
   }
 
   // /api/torrent?m=<magnet>&ix=&fn= -> strumień torrenta (webtorrent, HTTP Range dla TV)
@@ -996,7 +1161,7 @@ async function handleApi(req, res, u) {
 
   // /api/subtitles/:type/:id?season=&episode=  -> napisy z addonów usera, URL przez proxy
   if (seg[0] === 'subtitles') {
-    const type = seg[1], id = seg[2];
+    const type = seg[1], id = decodeURIComponent(seg[2] || '');
     const season = u.searchParams.get('season'), episode = u.searchParams.get('episode');
     const subs = await addonSubtitles(type, id, season, episode);
     const host = req.headers.host;
@@ -1025,8 +1190,29 @@ async function handleApi(req, res, u) {
         }
         const hh = {};
         ['content-type', 'content-length', 'accept-ranges', 'content-range'].forEach(k => { if (pres.headers[k]) hh[k] = pres.headers[k]; });
-        if (!hh['content-type']) hh['content-type'] = 'video/mp4';
         hh['Access-Control-Allow-Origin'] = '*';
+        if (u.searchParams.get('hls') === '1' || /\.m3u8(\?|$)/i.test(tgt)) {
+          const chunks = []; let size = 0;
+          pres.on('data', c => { if (size < 8 * 1048576) { chunks.push(c); size += c.length; } });
+          pres.on('end', () => {
+            const buf = Buffer.concat(chunks);
+            const head = buf.slice(0, 8).toString('utf8');
+            delete hh['content-range']; delete hh['content-encoding'];
+            if (head.indexOf('#EXTM3U') === 0) {
+              const body = rewriteHls(buf.toString('utf8'), tgt, req.headers.host || ('localhost:' + PORT));
+              if (!hh['content-type'] || hh['content-type'] === 'video/mp4') hh['content-type'] = 'application/vnd.apple.mpegurl';
+              hh['content-length'] = Buffer.byteLength(body);
+              res.writeHead(pres.statusCode, hh);
+              res.end(body);
+            } else {
+              hh['content-length'] = buf.length;
+              res.writeHead(pres.statusCode, hh);
+              res.end(buf);
+            }
+          });
+          return;
+        }
+        if (!hh['content-type']) hh['content-type'] = 'video/mp4';
         res.writeHead(pres.statusCode, hh);
         pres.pipe(res);
       });
@@ -1043,6 +1229,22 @@ async function handleApi(req, res, u) {
 
 // ---------- Serwer + statyczny hosting (opcjonalny) ----------
 // Wspólny proxy do dowolnego celu https (stary WebKit TV nie dogaduje nowoczesnego TLS)
+function rewriteHls(body, baseUrl, host) {
+  function prox(u) {
+    try {
+      const abs = new URL(u, baseUrl).toString();
+      const hls = /\.m3u8(\?|$)/i.test(abs) || /[?&]m3u8=/.test(abs);
+      return `http://${host}/api/proxy?u=${encodeURIComponent(abs)}` + (hls ? '&hls=1' : '');
+    } catch (e) { return u; }
+  }
+  return String(body).split('\n').map(line => {
+    const t = line.trim();
+    if (!t) return line;
+    if (t.charAt(0) === '#') return line.replace(/URI="([^"]+)"/g, (m, uri) => 'URI="' + prox(uri) + '"');
+    return prox(t);
+  }).join('\n');
+}
+
 function proxyTo(req, res, target, reqHost) {
   const headers = {};
   for (const k in req.headers) {
@@ -1063,6 +1265,19 @@ function proxyTo(req, res, target, reqHost) {
     rh['access-control-allow-headers'] = '*';
     rh['access-control-allow-methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS';
     const ct = (pres.headers['content-type'] || '').toLowerCase();
+    const wantHls = /[?&]hls=1(&|$)/.test(req.url || '');
+    if (wantHls) {
+      const chunks = []; let size = 0;
+      pres.on('data', c => { if (size < 8 * 1048576) { chunks.push(c); size += c.length; } });
+      pres.on('end', () => {
+        const body = rewriteHls(Buffer.concat(chunks).toString('utf8'), target, reqHost);
+        delete rh['content-length']; delete rh['content-encoding'];
+        rh['content-length'] = Buffer.byteLength(body);
+        res.writeHead(pres.statusCode, rh);
+        res.end(body);
+      });
+      return;
+    }
     if (/json|text|javascript/.test(ct)) {
       const chunks = [];
       pres.on('data', c => chunks.push(c));
@@ -1141,6 +1356,67 @@ function __route(req, res) {
         const r = await supaReq('POST', '/rest/v1/rpc/sync_delete_watch_progress', { p_profile_id: ACC.profileIndex, p_keys: [key] }, tok);
         done({ status: r.status, body: r.json });
       })().catch(fail);
+    }
+    if (p === 'library' && req.method === 'GET') {
+      return (async () => {
+        const tok = await userToken(); if (!tok) return done({ items: [], offline: true });
+        if (ACC.profileIndex == null) await resolveProfile();
+        const rows = []; let offset = 0;
+        while (true) {
+          const r = await supaReq('POST', '/rest/v1/rpc/sync_pull_library', { p_profile_id: ACC.profileIndex, p_limit: 500, p_offset: offset }, tok);
+          const page = Array.isArray(r.json) ? r.json : [];
+          rows.push(...page);
+          if (page.length < 500 || rows.length > 3000) break;
+          offset += 500;
+        }
+        done({ items: rows.map(mapLibraryRow).filter(x => x.id) });
+      })().catch(fail);
+    }
+    if (p === 'library' && req.method === 'POST') {
+      return readJsonBody(req).then(async body => {
+        const tok = await userToken(); if (!tok) return done({ ok: false, offline: true });
+        if (ACC.profileIndex == null) await resolveProfile();
+        const items = (body.items || []).filter(x => x && x.id).map(toLibraryRow);
+        if (!items.length) return done({ ok: true, pushed: 0 });
+        const r = await supaReq('POST', '/rest/v1/rpc/sync_push_library', { p_profile_id: ACC.profileIndex, p_items: items }, tok);
+        done({ ok: r.status < 300, status: r.status, pushed: items.length });
+      }).catch(fail);
+    }
+    if (p === 'watched' && req.method === 'GET') {
+      return (async () => {
+        const tok = await userToken(); if (!tok) return done({ items: [], offline: true });
+        if (ACC.profileIndex == null) await resolveProfile();
+        const rows = []; let page = 1;
+        while (true) {
+          const r = await supaReq('POST', '/rest/v1/rpc/sync_pull_watched_items', { p_profile_id: ACC.profileIndex, p_page: page, p_page_size: 900 }, tok);
+          const pg = Array.isArray(r.json) ? r.json : [];
+          rows.push(...pg);
+          if (pg.length < 900 || page >= 6) break;
+          page++;
+        }
+        done({ items: rows.map(mapWatchedRow).filter(x => x.id) });
+      })().catch(fail);
+    }
+    if (p === 'watched' && req.method === 'POST') {
+      return readJsonBody(req).then(async body => {
+        const tok = await userToken(); if (!tok) return done({ ok: false, offline: true });
+        if (ACC.profileIndex == null) await resolveProfile();
+        const add = (body.add || []).filter(x => x && x.id).map(x => ({
+          content_id: x.id, content_type: x.type || 'movie', title: x.title || '',
+          season: x.season == null ? null : Number(x.season), episode: x.episode == null ? null : Number(x.episode),
+          watched_at: Number(x.watchedAt) || Date.now()
+        }));
+        const remove = (body.remove || []).filter(x => x && x.id).map(x => {
+          const k = { content_id: x.id };
+          if (x.season != null) k.season = Number(x.season);
+          if (x.episode != null) k.episode = Number(x.episode);
+          return k;
+        });
+        let ok = true;
+        if (add.length) { const r = await supaReq('POST', '/rest/v1/rpc/sync_push_watched_items', { p_profile_id: ACC.profileIndex, p_items: add }, tok); ok = ok && r.status < 300; }
+        if (remove.length) { const r = await supaReq('POST', '/rest/v1/rpc/sync_delete_watched_items', { p_profile_id: ACC.profileIndex, p_keys: remove }, tok); ok = ok && r.status < 300; }
+        done({ ok, added: add.length, removed: remove.length });
+      }).catch(fail);
     }
     if (p === 'plugins') { return getUserPlugins().then(list => done({ plugins: list })).catch(fail); }
     if (p === 'tables') {

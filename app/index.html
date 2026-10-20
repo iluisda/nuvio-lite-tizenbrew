@@ -11,9 +11,35 @@
     <object id="av-player" type="application/avplayer"></object>
 
     <div id="app">
-        <!-- Pasek górny -->
-        <div id="topbar">
-            <div id="logo">NUVIO</div>
+        <!-- Pasek boczny (rail, jak w Nuvio) -->
+        <div id="sidebar">
+            <img id="brand" src="assets/brand/nuvio-wordmark.png" alt="Nuvio">
+            <div id="nav">
+                <div class="nav-item" data-i="0">
+                    <span class="nav-ico">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.7V20h13V9.7"/><path d="M10 20v-5.6h4V20"/></svg>
+                    </span>
+                    <span class="nav-label">Inicio</span>
+                </div>
+                <div class="nav-item" data-i="1">
+                    <span class="nav-ico">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 7.4l9 4.4 9-4.4L12 3Z"/><path d="m3 12.4 9 4.4 9-4.4"/><path d="m3 16.9 9 4.4 9-4.4"/></svg>
+                    </span>
+                    <span class="nav-label">Mi biblioteca</span>
+                </div>
+                <div class="nav-item" data-i="2">
+                    <span class="nav-ico">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.4 15.4 4.6 4.6"/></svg>
+                    </span>
+                    <span class="nav-label">Buscar</span>
+                </div>
+                <div class="nav-item" data-i="3">
+                    <span class="nav-ico">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.3a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.34a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.66 9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.66a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.66a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.34 9v.09c.68.7 1.7 1.08 2.66.87"/></svg>
+                    </span>
+                    <span class="nav-label">Ajustes</span>
+                </div>
+            </div>
             <div id="clock"></div>
         </div>
 
@@ -31,13 +57,60 @@
 
         <!-- Widok: strona główna -->
         <div id="view-home" class="view">
-            <div id="rows"></div>
+            <div id="home-hero">
+                <div id="hero-bg-a" class="hero-bg"></div>
+                <div id="hero-bg-b" class="hero-bg"></div>
+                <div id="hero-scrim"></div>
+                <div id="hero-copy" class="hidden">
+                    <div id="hero-kind"></div>
+                    <img id="hero-logo" class="hidden" alt="">
+                    <div id="hero-title"></div>
+                    <div id="hero-meta"></div>
+                    <div id="hero-overview"></div>
+                </div>
+            </div>
+            <div id="rows"><div id="rows-inner"></div></div>
+            <div id="rows-fade"></div>
+        </div>
+
+        <!-- Widok: biblioteka (guardados) -->
+        <div id="view-library" class="view hidden">
+            <div id="lib-head">
+                <div id="lib-title">Mi biblioteca</div>
+                <div id="lib-count"></div>
+            </div>
+            <div id="library-grid"><div id="library-grid-inner"></div></div>
+            <div id="lib-empty" class="hidden">
+                <div class="empty-ico">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 3 7.4l9 4.4 9-4.4L12 3Z"/><path d="m3 12.4 9 4.4 9-4.4"/><path d="m3 16.9 9 4.4 9-4.4"/></svg>
+                </div>
+                <div class="empty-title">Tu biblioteca está vacía</div>
+                <div class="empty-sub">Abre una película o serie y elige «Mi biblioteca» para guardarla aquí.</div>
+            </div>
+        </div>
+
+        <!-- Widok: catálogo completo (Ver todo) -->
+        <div id="view-catalog" class="view hidden">
+            <div id="cat-head">
+                <div id="cat-title"></div>
+                <div id="cat-count"></div>
+            </div>
+            <div id="cat-grid"><div id="cat-grid-inner"></div></div>
+        </div>
+
+        <!-- Widok: ajustes -->
+        <div id="view-settings" class="view hidden">
+            <div id="set-head">Ajustes</div>
+            <div id="set-list"></div>
         </div>
 
         <!-- Widok: szczegóły -->
         <div id="view-detail" class="view hidden">
             <div id="detail-backdrop"></div>
+            <div id="detail-scrim"></div>
             <div id="detail-content">
+                <div id="detail-kind"></div>
+                <img id="detail-logo" class="hidden" alt="">
                 <div id="detail-title"></div>
                 <div id="detail-meta"></div>
                 <div id="detail-overview"></div>
@@ -55,6 +128,7 @@
         <!-- Nakładka odtwarzacza -->
         <div id="view-player" class="view hidden">
             <div id="player-info"></div>
+            <div id="player-live" class="hidden">EN VIVO</div>
             <div id="player-bar">
                 <div id="player-progress"><div id="player-fill"></div></div>
                 <div id="player-time"></div>
@@ -62,6 +136,15 @@
             </div>
             <div id="player-status"></div>
             <div id="subtitle-text"></div>
+            <div id="upnext" class="hidden">
+                <div id="upnext-poster"><img id="upnext-img" alt=""></div>
+                <div id="upnext-body">
+                    <div id="upnext-label">Siguiente episodio</div>
+                    <div id="upnext-title"></div>
+                    <div id="upnext-hint">OK: reproducir ahora&nbsp;&nbsp;·&nbsp;&nbsp;Atrás: cancelar</div>
+                </div>
+                <div id="upnext-count">5</div>
+            </div>
             <!-- Menu ścieżek: dźwięk + napisy -->
             <div id="track-menu" class="hidden">
                 <div class="tm-col" id="tm-audio">
@@ -97,12 +180,22 @@
 
         <!-- Wyszukiwarka -->
         <div id="view-search" class="view hidden">
-            <div id="search-box"><span id="search-label">Buscar: </span><span id="search-query"></span><span id="cursor">_</span></div>
-            <div id="search-results"></div>
+            <div id="search-box">
+                <span id="search-ico">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.4 15.4 4.6 4.6"/></svg>
+                </span>
+                <span id="search-label">Buscar</span>
+                <span id="search-query"></span><span id="cursor">_</span>
+            </div>
             <div id="search-hint">Escribe con el mando o el teclado. ENTER = buscar.</div>
+            <div id="search-results"></div>
         </div>
+
+        <!-- Aviso flotante -->
+        <div id="toast" class="hidden"></div>
     </div>
 
+    <script src="vendor/hls.min.js"></script>
     <script src="js/config.js"></script>
     <script src="js/app.js"></script>
 </body>
