@@ -568,7 +568,8 @@ async function getHomeRows() {
       const t = String(c.id || '') + ' ' + String(c.name || '');
       if (/live|now|en vivo|ao vivo/i.test(t)) return 0;
       if (/24\/7|networks/i.test(t)) return 1;
-      if (/today|yesterday|this_week|older|recent/i.test(t)) return 4;
+      if (/upcoming|pr[oó]xim|next|schedule|agenda/i.test(t)) return 2;
+      if (/today|yesterday|this_week|older|recent/i.test(t)) return 5;
       if (/replays?$/i.test(String(c.id || ''))) return 2;
       return 3;
     };
