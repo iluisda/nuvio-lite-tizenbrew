@@ -534,6 +534,7 @@ async function getHomeRows() {
   const collById = {}; colls.forEach(c => { collById[c.id] = c; });
   const mc = await getAllManifests();
   const out = [];
+  const referenced = {};
   for (const it of items) {
     if (!it || !it.enabled) continue;
     if (it.is_collection) {
@@ -549,8 +550,42 @@ async function getHomeRows() {
       const m = findManifest(mc, parts[0]);
       const cat = m ? (m.catalogs || []).find(c => String(c.id) === catalogId && String(c.type || c.apiType) === type) : null;
       if (!m || !cat) continue;
+      referenced[m.id] = 1;
       out.push({ key, kind: 'catalog', title: it.custom_title || cat.name || catalogId, addonId: m.id, addonName: m.name, type, catalogId });
     }
+  }
+  // Addons nuevos: si el addon está habilitado pero su fila no está en el layout
+  // (o el layout quedó viejo), agregamos sus catálogos de deportes/TV igual.
+  const LIVE_TYPES = { sport: 1, channel: 1, tv: 1 };
+  const extra = [];
+  const seen = {};
+  for (const row of out) seen[row.key] = 1;
+  for (const m of mc.list) {
+    if (referenced[m.id]) continue;
+    const live = (m.catalogs || []).filter(c => LIVE_TYPES[String(c.type || c.apiType)]);
+    if (!live.length) continue;
+    const prio = c => {
+      const t = String(c.id || '') + ' ' + String(c.name || '');
+      if (/live|now|en vivo|ao vivo/i.test(t)) return 0;
+      if (/24\/7|networks/i.test(t)) return 1;
+      if (/today|yesterday|this_week|older|recent/i.test(t)) return 4;
+      if (/replays?$/i.test(String(c.id || ''))) return 2;
+      return 3;
+    };
+    const ordered = live.map((c, i) => ({ c, i })).sort((a, b) => (prio(a.c) - prio(b.c)) || (a.i - b.i)).map(x => x.c);
+    let n = 0;
+    for (const c of ordered) {
+      const type = String(c.type || c.apiType);
+      const key = m.id + ':' + type + ':' + c.id;
+      if (seen[key] || n >= 10) continue;
+      seen[key] = 1; n++;
+      extra.push({ key, kind: 'catalog', title: String(cleanEmoji(c.name || c.id) || '').trim(), addonId: m.id, addonName: m.name, type, catalogId: c.id });
+    }
+  }
+  if (extra.length) {
+    let at = -1;
+    for (let i = 0; i < out.length; i++) if (LIVE_TYPES[out[i].type]) at = i;
+    out.splice(at + 1, 0, ...extra);
   }
   return { rows: out };
 }
@@ -568,7 +603,7 @@ async function fetchAddonCatalog(addonId, type, catalogId, genre, skip, page) {
   return metas.map(x => ({
     id: String(x.id || ''),
     type: nativeType(x.type, type),
-    title: x.name || x.title || '',
+    title: String(cleanEmoji(x.name || x.title || '') || '').trim(),
     poster: x.poster || x.landscapePoster || '',
     background: x.background || '',
     logo: x.logo || '',

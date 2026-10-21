@@ -45,7 +45,9 @@ Sin variables CSS, `grid`, `gap` ni `aspect-ratio`: el motor de la TV no los sop
 
 ### TV en vivo y deportes
 
-- Filas `channel` / `sport` / `tv` de los addons (FrostView, Sports Streams, NexoTV) se abren directo en el player, sin pasar por TMDB.
+- Filas `channel` / `sport` / `tv` de los addons (FrostView, Sports Streams, Nuvio Live Sports, NexoTV) se abren directo en el player, sin pasar por TMDB.
+- Si instalás un addon de deportes/TV nuevo y su fila no está en el layout del home, el bridge agrega automáticamente hasta 10 de sus catálogos (prioriza Live/24-7 y las categorías principales), así no hay que tocar Ajustes en la tele.
+- Los títulos de addons se limpian de emoji (la tele vieja no tiene fuente de emoji).
 - Zapping: **ARRIBA/ABAJO** cambia de canal mientras reproduce; **BACK** vuelve al home.
 - HLS: el bridge reescribe playlists (`&hls=1`) y la app usa `hls.js` 0.14 (ES5, compatible con M47). Si el canal entrega MP4 directo, va por `<video>` normal.
 
